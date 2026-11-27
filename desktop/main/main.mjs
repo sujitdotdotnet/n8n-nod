@@ -3671,12 +3671,13 @@ else {
       });
       ipcMain.handle('nod:setup:preferences', async (event) => {
         if (!isEngine(event) || remoteConnection) throw new Error('Local setup is unavailable.');
-        if ((await settings.get()).onboardingPreferenceStep !== 'complete')
-          await saveRendererSettings(event, {
-            launchAtLogin: true,
-            onboardingPreferenceStep: 'complete',
-          });
-        return { preferenceStep: 'complete' };
+        if ((await settings.get()).onboardingPreferenceStep === 'complete')
+          return { preferenceStep: 'complete' };
+        const saved = await saveRendererSettings(event, {
+          launchAtLogin: true,
+          onboardingPreferenceStep: 'complete',
+        });
+        return { preferenceStep: 'complete', launchAtLogin: saved.launchAtLogin };
       });
       ipcMain.handle('nod:setup:reconcile', async (event) => {
         if (!isEngine(event) || remoteConnection) throw new Error('Local setup is unavailable.');

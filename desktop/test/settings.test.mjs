@@ -10164,7 +10164,8 @@ test('onboarding completion crosses the client and native boundary in each suppo
         }
         const client = await onboardingClient(native.bridge);
         assert.equal(client.desktopRuntimeAvailable(), local);
-        if (local) await client.completeDesktopPreferences();
+        if (local)
+          assert.equal(typeof (await client.completeDesktopPreferences()).launchAtLogin, 'boolean');
         if (remote) {
           assert.equal(native.bridge.localRuntime, undefined);
           assert.equal(native.bridge.prepare, undefined);
