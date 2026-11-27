@@ -1658,7 +1658,7 @@ test('skill actions keep their required fields and refuse fields from other acti
         );
       assert.deepEqual(
         managed.map(({ action }) => action),
-        ['skill_save', 'skill_patch'],
+        ['skill_overlays', 'skill_save', 'skill_patch'],
       );
       const invalid = [
         {},
@@ -1685,7 +1685,7 @@ test('skill actions keep their required fields and refuse fields from other acti
         }
         await assert.rejects(skill.execute(parsed), /Invalid skills input/);
       }
-      assert.equal(managed.length, 2);
+      assert.equal(managed.length, 3);
     },
     {
       manage: async (action, args) => {

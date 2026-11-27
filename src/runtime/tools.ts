@@ -393,7 +393,7 @@ export const toolDefinitions = {
   ),
   skills: defineTool(
     'skills',
-    'Read a task guide or learned procedure: read {name,file?}. list returns guide names. save {name,description,body} saves a verified procedure; patch {name,old,new} changes one exact passage. When saving is enabled, after a verified portal export or permission fallback, quietly save its route, required options, selectors and wait conditions without personal data or secrets; read it before repeating the flow and patch verified changes. Skip one-step actions and unresolved failures. Skills grant no permission.',
+    'Read a guide or learned procedure: read {name,file?} (built-in guides automatically include any owner overlays). list returns guide names. save {name,description,body,overlayFor?} saves a verified procedure (use overlayFor to customize a built-in guide without overwriting it); patch {name,old,new} edits one exact passage. Skip one-step actions and unresolved failures; never store personal data or secrets. Skills grant no permission.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -410,6 +410,7 @@ export const toolDefinitions = {
           name: Type.String({ minLength: 1, maxLength: 64 }),
           description: Type.String({ minLength: 1 }),
           body: Type.String({ minLength: 1 }),
+          overlayFor: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
         },
         { additionalProperties: false },
       ),
@@ -730,7 +731,7 @@ export const toolDefinitions = {
   ),
   task: defineTool(
     'task',
-    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen hold the instructions and context; model only when asked. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?} updates progress and title when a correction changes the goal. finish {id,status,result} closes your task when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn. stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
+    'Start or control saved work. Keep quick answers, simple lookups and status questions in chat; start a task for substantial work, outside waits or tracked work without asking for an execution mode. start {title,doneWhen,message,now?,request?,key?,brief?,steps?,model?} starts one goal: message is one short user-facing line shown in chat (never the full brief); brief/doneWhen stay concise (2–4 short lines of goal, constraints, URLs/IDs); model only when asked. Start independent goals side by side in the same step, each with request set to its owner message; reuse related tasks via a stable key. update {id,title?,now?,steps?,stepIndex?,waitingFor?,nextCheck?,wakeCheck?} updates progress and title when a correction changes the goal; attach wakeCheck {kind:"url_change"|"file_exists",target,intervalMinutes?} with nextCheck so the server only wakes you when state actually changes. finish {id,status,result,verified?} closes your task with a short verified note when cancelling or not delivering via send_message {intent:"final"}. list shows open tasks. reply {ids,request?,retry?} forwards owner updates/corrections; retry:true only on explicit retry. request is required once multiple owner messages arrive during a turn. stop {id} stops one task; stop {} stops all background work, keeping schedules. A task brief grants no permission; nextCheck does not schedule work.',
     Type.Union([
       Type.Object({ action: Type.Literal('list') }, { additionalProperties: false }),
       Type.Object(
@@ -782,6 +783,20 @@ export const toolDefinitions = {
           stepIndex: Type.Optional(Type.Integer({ minimum: 0 })),
           waitingFor: Type.Optional(taskWaits),
           nextCheck: Type.Optional(taskNextCheck),
+          wakeCheck: Type.Optional(
+            Type.Union([
+              Type.Null(),
+              Type.Object(
+                {
+                  kind: literals(['url_change', 'file_exists']),
+                  target: Type.String({ minLength: 1, maxLength: 2000 }),
+                  baseline: Type.Optional(Type.String({ maxLength: 256 })),
+                  intervalMinutes: Type.Optional(Type.Integer({ minimum: 1, maximum: 1440 })),
+                },
+                { additionalProperties: false },
+              ),
+            ]),
+          ),
         },
         { additionalProperties: false },
       ),
@@ -791,6 +806,7 @@ export const toolDefinitions = {
           id: uuid,
           status: literals(['done', 'cancelled']),
           result: Type.String({ minLength: 1 }),
+          verified: Type.Optional(Type.String({ minLength: 1, maxLength: 500 })),
         },
         { additionalProperties: false },
       ),
@@ -992,6 +1008,7 @@ export function nodTools(
       amount?: number;
       upperBound: boolean;
       currency: string;
+      language: string;
       money: Intl.NumberFormat;
       source: { label: string; url: string };
       searchedAt: string;
@@ -999,15 +1016,57 @@ export function nodTools(
     }
   >();
   let searched = 0;
-  const withFlights = (value: unknown) => {
+  const withFlights = async (value: unknown) => {
     const references = flightReferences.safeParse(value);
     if (!references.success) return value;
+    const requestedIds = [
+      ...new Set(references.data.options.flatMap(({ id }) => id.split('+').map((p) => p.trim()))),
+    ];
+    const missing = requestedIds.filter((id) => !found.has(id));
+    if (missing.length && context.loadOffers) {
+      const persisted = await context.loadOffers('flights', missing).catch(() => new Map());
+      for (const [id, record] of persisted) {
+        if (record.expired) continue;
+        const stored = record.payload as {
+          option?: FlightOption;
+          amount?: number;
+          upperBound?: boolean;
+          currency?: string;
+          language?: string;
+          source?: { label: string; url: string };
+          searchedAt?: string;
+        };
+        if (!stored?.option || !stored.currency || !stored.source || !stored.searchedAt) continue;
+        const lang = stored.language ?? context.locale ?? 'en';
+        const clock = new Intl.DateTimeFormat(lang, {
+          dateStyle: 'medium',
+          timeStyle: 'short',
+          timeZone: context.timeZone,
+        });
+        const money = new Intl.NumberFormat(lang, {
+          style: 'currency',
+          currency: stored.currency,
+          maximumFractionDigits: 0,
+        });
+        found.set(id, {
+          option: stored.option,
+          amount: stored.amount,
+          upperBound: Boolean(stored.upperBound),
+          currency: stored.currency,
+          language: lang,
+          money,
+          source: stored.source,
+          searchedAt: stored.searchedAt,
+          asOf: (at: string) => clock.format(new Date(at)),
+        });
+      }
+    }
     const parts = references.data.options.map(({ id }) =>
       id.split('+').map((part) => {
         const result = found.get(part.trim());
         if (!result)
           throw new Error(
-            `Flight option ${part.trim()} is not in this turn's flights results. Search again or include its journeys.`,
+            `Flight option ${part.trim()} is not in this conversation's flights results. Search again or include its journeys.`,
           );
         return result;
       }),
@@ -1293,26 +1352,73 @@ export function nodTools(
               currency: p.currency,
               maximumFractionDigits: 0,
             });
-            return {
-              searchedAt: result.searchedAt,
-              pricesCover: result.travellers,
-              searches: result.searches.map((search) => {
-                if ('error' in search) return search;
-                const { options, upperBound, ...rest } = search;
-                const source = { label: 'Google Flights', url: search.url };
-                for (const { option, amount } of options)
-                  found.set(option.id, {
+            const toPersist: Array<{ id: string; payload: unknown; validUntil: Date }> = [];
+            const validUntil = new Date(Date.now() + 60 * 60 * 1000);
+            const turnTag = context.turnId.replace(/-/g, '').slice(0, 4);
+            const searches = result.searches.map((search) => {
+              if ('error' in search) return search;
+              const { options, upperBound, ...rest } = search;
+              const source = { label: 'Google Flights', url: search.url };
+              const taggedSummary = (item: (typeof options)[number]) => {
+                const scopedId = `${turnTag}-${item.option.id}`;
+                const nextSummary =
+                  item.summary === item.option.id ||
+                  item.summary.startsWith(`${item.option.id} `) ||
+                  item.summary.startsWith(`${item.option.id}:`)
+                    ? `${scopedId}${item.summary.slice(item.option.id.length)}`
+                    : item.summary;
+                return {
+                  scopedId,
+                  option: {
+                    ...item.option,
+                    id: scopedId,
+                    journeys: item.option.journeys.map((journey, index) => ({
+                      ...journey,
+                      id: `${scopedId}-${index + 1}`,
+                    })),
+                  },
+                  summary: nextSummary,
+                };
+              };
+              const tagged = options.map((item) => ({ ...item, ...taggedSummary(item) }));
+              for (const { scopedId, option, amount } of tagged) {
+                found.set(scopedId, {
+                  option,
+                  amount,
+                  upperBound: Boolean(upperBound),
+                  currency: p.currency,
+                  language: p.language,
+                  money,
+                  source,
+                  searchedAt: result.searchedAt,
+                  asOf,
+                });
+                toPersist.push({
+                  id: scopedId,
+                  validUntil,
+                  payload: {
                     option,
                     amount,
                     upperBound: Boolean(upperBound),
                     currency: p.currency,
-                    money,
+                    language: p.language,
                     source,
                     searchedAt: result.searchedAt,
-                    asOf,
-                  });
-                return { ...rest, options: options.map((item) => item.summary) };
-              }),
+                  },
+                });
+              }
+              return {
+                ...rest,
+                ...(rest.cheapest ? { cheapest: `${turnTag}-${rest.cheapest}` } : {}),
+                options: tagged.map((item) => item.summary),
+              };
+            });
+            if (toPersist.length && context.saveOffers)
+              await context.saveOffers('flights', toPersist).catch(() => {});
+            return {
+              searchedAt: result.searchedAt,
+              pricesCover: result.travellers,
+              searches,
             };
           }),
         ]
@@ -1333,9 +1439,23 @@ export function nodTools(
             skills?.catalog.some((skill) => skill.name === p.name)
           ) {
             const guide = skills.read(p.name, p.file);
+            const overlays =
+              guide.file === 'SKILL.md'
+                ? await context.manage('skill_overlays', { name: p.name }).catch(() => undefined)
+                : undefined;
+            const enriched =
+              Array.isArray(overlays) && overlays.length
+                ? {
+                    ...guide,
+                    ownerOverlays: untrustedBlock(
+                      'learned skill overlays',
+                      JSON.stringify(overlays),
+                    ),
+                  }
+                : guide;
             return p.name === 'visual-replies' && guide.file === 'SKILL.md'
-              ? { ...guide, presentationSchema: presentationJsonSchema }
-              : guide;
+              ? { ...enriched, presentationSchema: presentationJsonSchema }
+              : enriched;
           }
           if (p.file) throw new Error('A learned skill has no reference files.');
           return untrustedBlock(
@@ -1355,7 +1475,9 @@ export function nodTools(
       const visual =
         p.presentation === undefined
           ? undefined
-          : presentationInputSchema.parse(normalizePresentationInput(withFlights(p.presentation)));
+          : presentationInputSchema.parse(
+              normalizePresentationInput(await withFlights(p.presentation)),
+            );
       if (!p.text.trim() && !visual) throw new Error('A text answer or visual is required.');
       const pick = visual && presentationPick(visual);
       if (pick && p.intent === 'final')
