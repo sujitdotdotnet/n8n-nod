@@ -122,7 +122,7 @@ const admissions = new AsyncLocalStorage<{
   admit(asks: boolean, read?: boolean): Promise<void>;
 }>();
 const nestedCalls = new AsyncLocalStorage<boolean>();
-const browserTools = new Set(['browser', 'sign_in', 'pay']);
+const browserTools = new Set(['browser', 'browser_run', 'sign_in', 'pay']);
 const confirmationNotice = 'The confirmation question is in chat. Wait for the reply.';
 const reportingTools = new Set(['ask_user', 'send_message', 'share_file']);
 const reportingTaskActions = new Set(['finish', 'list', 'stop', 'update']);
@@ -136,6 +136,7 @@ const delimitedTools = new Set([
   'computer',
   'delegate',
   'browser',
+  'browser_run',
   'sign_in',
   'web_search',
   'fetch_content',
@@ -715,8 +716,7 @@ export function createAgentRuntime(dependencies: {
             );
           const notice =
             output === confirmationNotice ||
-            (name === 'browser' &&
-              (params as { action?: unknown })?.action === 'steps' &&
+            (name === 'browser_run' &&
               typeof output === 'object' &&
               output !== null &&
               Object.keys(output).join() === 'steps,stopped,result' &&

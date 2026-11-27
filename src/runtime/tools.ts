@@ -46,6 +46,8 @@ import { untrustedBlock } from '../shared/untrusted.ts';
 import { withoutSchemaPatterns } from '../shared/json-schema.ts';
 import type { Turn } from './turn.ts';
 import type { FlightOption, FlightSearch } from '../ports/flights.ts';
+import { createPageDiffer } from './browser-diff.ts';
+import { runBrowserScript } from './browser-run.ts';
 
 export const memoryActions = [
   'memory_find',
@@ -112,36 +114,6 @@ const browserFields = {
   amount: Type.Optional(Type.Integer({ minimum: 1 })),
   waitMs: Type.Optional(Type.Integer({ minimum: 0 })),
 };
-
-const browserStep = Type.Object(
-  {
-    action: literals([
-      'open',
-      'click',
-      'fill',
-      'type',
-      'press',
-      'scroll',
-      'select',
-      'check',
-      'uncheck',
-      'hover',
-      'drag',
-      'back',
-      'forward',
-      'reload',
-      'tab_switch',
-      'wait',
-      'evaluate',
-      'accept_dialog',
-      'dismiss_dialog',
-      'snapshot',
-      'screenshot',
-    ]),
-    ...browserFields,
-  },
-  { additionalProperties: false },
-);
 
 function unionOfObjects(schema: TSchema) {
   const members = (schema as { anyOf?: ObjectSchema[] }).anyOf;
@@ -492,7 +464,7 @@ export const toolDefinitions = {
   ),
   browser: defineTool(
     'browser',
-    'Control the private browser. open {url}; snapshot {selector?,offset?} returns page text and @eN refs; selector takes a current @eN ref, or CSS only for an element without one; click/fill/type/select/check/uncheck/hover {selector,text?}; press {key}; drag {selector,targetSelector} or {points,durationMs?}; upload {selector,path}; back/forward/reload; tab_list/tab_switch {tabId}; scroll {direction,selector?,amount?}; wait {text|url|load,waitMs?}; accept_dialog {text?}/dismiss_dialog; evaluate {script} runs one JavaScript expression. screenshot returns an image; share_screenshot {name?} stages an image for delivery. Coordinates x,y are fractions of a fresh screenshot. Never type secrets. download {url?|selector?,name?} saves a file; with neither it uses the open PDF or last download. Click document controls and inspect before downloading. Background files stay private until share_file. handoff {text} gives the owner control and pauses; state the needed action, then inspect after handback. Never send a /browser link. waitMs allows slow pages. After an action, the page is its first 10,000 characters without link addresses; snapshot reads up to 40,000 with them. steps {steps} runs up to 10 actions in order, each as {action,...}, without coordinates, and returns script results and the last page; snapshot or screenshot only as the last step. Use steps when you know the next actions, such as open then evaluate, or fill fields then submit. It stops at a failure, an unmet wait, a step that needs approval, or an @eN ref after the page address changed, and says which steps ran.',
+    'Control the private browser for single actions. open {url}; snapshot {selector?,offset?} returns full page text and @eN refs; selector takes a current @eN ref, or CSS only for an element without one; click/fill/type/select/check/uncheck/hover {selector,text?}; press {key}; drag {selector,targetSelector} or {points,durationMs?}; upload {selector,path}; back/forward/reload; tab_list/tab_switch {tabId}; scroll {direction,selector?,amount?}; wait {text|url|load,waitMs?}; accept_dialog {text?}/dismiss_dialog; evaluate {script} runs one JavaScript expression. screenshot returns an image; share_screenshot {name?} stages an image for delivery. Coordinates x,y are fractions of a fresh screenshot. Never type secrets. download {url?|selector?,name?} saves a file; with neither it uses the open PDF or last download. Click document controls and inspect before downloading. Background files stay private until share_file. handoff {text} gives the owner control and pauses; state the needed action, then inspect after handback. Never send a /browser link. waitMs allows slow pages. On the same URL, actions return only changed lines; call snapshot for the full page (up to 40,000 characters with link addresses). Prefer browser_run when running multiple actions, loops or conditionals.',
     Type.Object({
       action: literals([
         'handoff',
@@ -521,10 +493,8 @@ export const toolDefinitions = {
         'wait',
         'accept_dialog',
         'dismiss_dialog',
-        'steps',
       ]),
       ...browserFields,
-      steps: Type.Optional(Type.Array(browserStep, { minItems: 1, maxItems: 10 })),
       x: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       y: Type.Optional(Type.Number({ minimum: 0, maximum: 1 })),
       points: Type.Optional(
@@ -539,10 +509,23 @@ export const toolDefinitions = {
       durationMs: Type.Optional(Type.Integer({ minimum: 0 })),
       path: Type.Optional(Type.String()),
       offset: Type.Optional(Type.Integer({ minimum: 0 })),
+      full: Type.Optional(Type.Boolean()),
       name: Type.Optional(Type.String({ minLength: 1 })),
     }),
     true,
-    ['sign_in', 'pay'],
+    ['sign_in', 'pay', 'browser_run'],
+  ),
+  browser_run: defineTool(
+    'browser_run',
+    'Run an async JavaScript snippet against the private browser in one call (up to 20 actions, 30s timeout). Prefer this over repeated browser calls for multi-step flows: open and extract, fill a form and submit, paginate, or branch on page state. Available in scope: `page` with async methods open(url, {waitMs?}), snapshot({selector?, offset?}), click(selector, {waitMs?}), fill(selector, text, {waitMs?}), type(selector, text, {waitMs?}), press(key, {waitMs?}), select(selector, text, {waitMs?}), check(selector), uncheck(selector), hover(selector), drag(selector, targetSelector), scroll(direction?, {amount?, selector?}), back(), forward(), reload(), wait({text|url|load, waitMs?}), evaluate(script), tabList(), tabSwitch(tabId), acceptDialog(text?), dismissDialog(), screenshot(). Intermediate actions skip snapshots for speed; return a value directly or end without a return value to get the final page view. Every committing action still goes through trust checks and pauses cleanly if approval is needed.',
+    Type.Object(
+      {
+        code: Type.String({ minLength: 1 }),
+      },
+      { additionalProperties: false },
+    ),
+    true,
+    ['browser', 'sign_in', 'pay'],
   ),
   sign_in: defineTool(
     'sign_in',
@@ -863,23 +846,10 @@ function bind<P extends TSchema>(
   } as NodTool;
 }
 
-function pageText(page: BrowserObservation) {
-  return `URL: ${page.url}\n${page.text}`;
-}
-
 function pageKey(url: string) {
   try {
     const page = new URL(url);
     return `${page.origin}${page.pathname}`;
-  } catch {
-    return url;
-  }
-}
-
-function pageLocation(url: string) {
-  try {
-    const page = new URL(url);
-    return `${page.origin}${page.pathname}${page.search}${page.hash}`;
   } catch {
     return url;
   }
@@ -901,10 +871,6 @@ const commits = (step: BrowserAction) =>
     step.action,
   ) ||
   (step.action === 'type' && /[\r\n]/.test(step.text ?? ''));
-
-const navigations = new Set(['open', 'back', 'forward', 'reload', 'tab_switch']);
-
-const reference = (value: string | undefined) => /^@?(?:ref=)?e\d+$/.test(value?.trim() ?? '');
 
 const mcpPart = (value: string) =>
   value
@@ -1054,9 +1020,10 @@ export function nodTools(
   };
   const { browserId } = turn.execution;
   const { signal } = context;
-  const screenshot = async () => {
-    const bytes = await computer.screenshot(browserId, signal);
-    signal.throwIfAborted();
+  const screenshot = async (overrideSignal?: AbortSignal) => {
+    const activeSignal = overrideSignal ?? signal;
+    const bytes = await computer.screenshot(browserId, activeSignal);
+    activeSignal.throwIfAborted();
     if (bytes && computer.screenStatus && computer.screenStatus(browserId).state !== 'live')
       throw new Error(
         'A live browser screenshot is unavailable. Reopen the page and take a fresh screenshot before continuing. Do not repeat an action whose result is uncertain.',
@@ -1068,16 +1035,15 @@ export function nodTools(
     return 'Waiting for the user to sign in.';
   };
   let typedPage = '';
-  let lastLocation = '';
   let typed: string[] = [];
   let pressing = false;
-  const observed = (
+  const differ = createPageDiffer();
+  const recordObservation = (
     step: { action: string; text?: string; key?: string },
     page: BrowserObservation,
     choice?: string,
   ) => {
     turn.visited(browserId, page.url);
-    lastLocation = pageLocation(page.url);
     const key = pageKey(page.url);
     const same = typedPage === key || !typedPage;
     if (key !== typedPage) {
@@ -1094,10 +1060,22 @@ export function nodTools(
       typed = [...typed, step.text.slice(0, 500)].slice(-10);
     else if (same && choice) typed = [...typed, choice.slice(0, 500)].slice(-10);
     pressing = same && Boolean(pressed);
-    return pageText(page);
+  };
+  const observed = (
+    step: { action: string; text?: string; key?: string; full?: boolean },
+    page: BrowserObservation,
+    choice?: string,
+  ) => {
+    recordObservation(step, page, choice);
+    if (step.action === 'evaluate' || step.action === 'tab_list')
+      return `URL: ${page.url}\n${page.text}`;
+    return differ.format(page.url, page.text, {
+      full: Boolean(step.full) || step.action === 'snapshot',
+    });
   };
   const check = async (
     step: BrowserStep['step'],
+    checkSignal: AbortSignal = signal,
   ): Promise<
     | {
         binding: { expectOrigin?: string; expectUrl?: string; expectTarget?: string };
@@ -1107,11 +1085,12 @@ export function nodTools(
     | { output: unknown }
   > => {
     if (!context.browserStep) return { binding: {} };
+    checkSignal.throwIfAborted();
     const page = await computer.currentPage(
       browserId,
       step.action === 'upload' ? { action: 'click', selector: step.selector } : step,
     );
-    signal.throwIfAborted();
+    checkSignal.throwIfAborted();
     const control = page.controls?.length === 1 ? page.controls[0]! : undefined;
     if (
       control &&
@@ -1128,7 +1107,7 @@ export function nodTools(
       typed: pageKey(page.url) === typedPage ? typed : [],
       subagent: Boolean(turn.execution.parentRunId),
     });
-    signal.throwIfAborted();
+    checkSignal.throwIfAborted();
     if (verdict === 'run' || (typeof verdict === 'object' && 'record' in verdict))
       return {
         ...(verdict === 'run' ? {} : { record: verdict.record }),
@@ -1155,105 +1134,35 @@ export function nodTools(
   const act = async (
     step: BrowserAction,
     started?: () => void,
+    options?: { observe?: boolean; signal?: AbortSignal },
   ): Promise<{ page: BrowserObservation; choice?: string } | { output: unknown }> => {
+    const activeSignal = options?.signal ?? signal;
     if (step.action === 'evaluate' && context.browserStep)
       try {
-        return { page: await computer.act(browserId, { ...step, readOnly: true }, signal) };
+        return { page: await computer.act(browserId, { ...step, readOnly: true }, activeSignal) };
       } catch (error) {
         if (!(error instanceof BrowserActionError && error.code === 'browser_script_writes'))
           throw error;
       }
-    const checked = commits(step) ? await check(step) : { binding: {} };
+    const checked = commits(step) ? await check(step, activeSignal) : { binding: {} };
     if ('output' in checked) return { output: checked.output };
     started?.();
-    const page = await computer.act(browserId, { ...step, ...checked.binding }, signal);
+    const shouldSkipObserve =
+      options?.observe === false &&
+      step.action !== 'snapshot' &&
+      step.action !== 'evaluate' &&
+      step.action !== 'tab_list';
+    const page = await computer.act(
+      browserId,
+      {
+        ...step,
+        ...checked.binding,
+        ...(shouldSkipObserve ? { observe: false } : {}),
+      },
+      activeSignal,
+    );
     if ('record' in checked) await checked.record?.();
     return { page, choice: checked.choice };
-  };
-  const steps = async (list: Static<typeof browserStep>[]) => {
-    if (list.slice(0, -1).some((step) => ['snapshot', 'screenshot'].includes(step.action)))
-      throw new Error('Put snapshot or screenshot only as the last step.');
-    const notes: string[] = [];
-    let shown = '';
-    let at = lastLocation;
-    let moved = false;
-    const ran = (count: number) =>
-      `Ran ${count} of ${list.length} steps${
-        count
-          ? `: ${list
-              .slice(0, count)
-              .map((step) => step.action)
-              .join(', ')}`
-          : ''
-      }.`;
-    const report = (count: number, reason?: string) =>
-      [ran(count), reason, ...notes, shown].filter(Boolean).join('\n\n');
-    for (const [index, item] of list.entries()) {
-      const label = `Step ${index + 1} (${item.action})`;
-      if (item.action === 'screenshot') {
-        let bytes: Awaited<ReturnType<typeof screenshot>>;
-        try {
-          bytes = await screenshot();
-        } catch (error) {
-          if (signal.aborted) throw error;
-          const message = error instanceof Error ? error.message : String(error);
-          throw new Error(`${ran(index)} ${label} failed; later steps did not run. ${message}`, {
-            cause: error,
-          });
-        }
-        if (!bytes) return report(index, `${label} found no open page.`);
-        shown = '';
-        return {
-          content: [
-            { type: 'text', text: report(index + 1) },
-            { type: 'image', data: bytes.toString('base64'), mimeType: 'image/png' },
-          ],
-          details: {},
-        };
-      }
-      if (moved && [item.selector, item.targetSelector].some((value) => reference(value)))
-        return report(
-          index,
-          `Stopped before ${label}: the page may have changed, so its @eN refs may be out of date. Choose them again from the page below.`,
-        );
-      const step = item as BrowserAction;
-      let done;
-      let started = false;
-      try {
-        done = await act(step, () => {
-          started = true;
-        });
-      } catch (error) {
-        if (signal.aborted) throw error;
-        const message = error instanceof Error ? error.message : String(error);
-        if (error instanceof BrowserActionError && error.code === 'browser_click_intercepted')
-          return report(index, `${label} did not run; later steps did not run. ${message}`);
-        throw new Error(
-          `${ran(index)} ${label} ${started ? 'failed and may have taken effect' : 'did not run'}; later steps did not run. ${message}`,
-          { cause: error },
-        );
-      }
-      if ('output' in done)
-        return {
-          steps: ran(index),
-          stopped: `${label} and the steps after it did not run.`,
-          result: done.output,
-        };
-      const text = observed(step, done.page, done.choice);
-      if (step.action === 'evaluate') {
-        notes.push(`${label}:\n${text}`);
-        shown = '';
-      } else shown = text;
-      const key = pageLocation(done.page.url);
-      if (navigations.has(step.action) || (at ? key !== at : commits(step))) moved = true;
-      at = key;
-      if (done.page.unmet && index < list.length - 1)
-        return report(
-          index + 1,
-          `The wait in ${label.toLowerCase()} was not met, so later steps did not run.`,
-        );
-    }
-    return report(list.length);
   };
   return [
     ...(context.proactivity
@@ -1440,7 +1349,7 @@ export function nodTools(
         };
       return context.reactToMessage(p.messageId, p.reaction);
     }),
-    bind(toolDefinitions.browser, async ({ action, name, steps: list, ...rest }) => {
+    bind(toolDefinitions.browser, async ({ action, name, ...rest }) => {
       if (action === 'handoff') {
         if (turn.execution.parentRunId)
           throw new Error(
@@ -1450,6 +1359,7 @@ export function nodTools(
         if (!text) throw new Error('Say what the user needs to do on the current page.');
         await computer.currentPage(browserId);
         signal.throwIfAborted();
+        differ.reset();
         await pause('browser', text);
         return 'The browser is in chat. Wait for the user to return control.';
       }
@@ -1511,14 +1421,19 @@ export function nodTools(
         await checked.record?.();
         return observed({ action }, page);
       }
-      if (action === 'steps') {
-        if (!list?.length) throw new Error('Give the steps to run as a non-empty steps list.');
-        return steps(list);
-      }
-      const step = { action, ...rest } as BrowserAction;
+      const { full, ...step } = { action, ...rest } as BrowserAction & { full?: boolean };
       const done = await act(step);
-      return 'output' in done ? done.output : observed(step, done.page, done.choice);
+      return 'output' in done ? done.output : observed({ ...step, full }, done.page, done.choice);
     }),
+    bind(toolDefinitions.browser_run, async ({ code }) =>
+      runBrowserScript(code, {
+        signal,
+        act,
+        record: recordObservation,
+        format: (page, full) => differ.format(page.url, page.text, { full }),
+        screenshot: async (overrideSignal) => (await screenshot(overrideSignal)) ?? undefined,
+      }),
+    ),
     bind(toolDefinitions.sign_in, async ({ message, action, ...request }) => {
       const result = await context.requestCredential(request);
       if (appConfirmation in result) return confirm(result);
