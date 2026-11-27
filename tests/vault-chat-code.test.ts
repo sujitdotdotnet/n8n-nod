@@ -672,6 +672,29 @@ test(
         },
       );
       await t.test(
+        'a code sent in another chat is held back while a bot waits for it',
+        async () => {
+          await reset();
+          const bot = randomUUID();
+          await db.pool.query(
+            `INSERT INTO bots(id,owner_id,name,model,uid) VALUES($1,$2,'Penny','{}'::jsonb,100001)`,
+            [bot, ownerId],
+          );
+          const request = await seed();
+          await db.pool.query('UPDATE turns SET bot_id=$1 WHERE id=$2', [bot, request.turnId]);
+          const elsewhere = await send('482913');
+          assert.equal(elsewhere.statusCode, 409);
+          assert.match(elsewhere.json().error, /chat that asked/);
+          assert.deepEqual(ordinary, []);
+          assert.deepEqual(injected, []);
+          assert.equal((await send('482913', { botId: bot })).statusCode, 200);
+          assert.deepEqual(
+            injected.map(({ turnId, code }) => ({ turnId, code })),
+            [{ turnId: request.turnId, code: '482913' }],
+          );
+        },
+      );
+      await t.test(
         'an expired payment still holds code-like replies while an invoice question reaches chat',
         async () => {
           await reset();

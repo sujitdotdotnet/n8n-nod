@@ -23,6 +23,8 @@ export function analyticsRoute(value: string) {
     if (/^\/(?:vault|credentials)\/[^/]+$/.test(path)) return '/credentials';
     if (/^\/payments\/[^/]+$/.test(path)) return '/payments';
     if (preparedWorkId(path)) return '/prepared';
+    if (/^\/bot\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(path))
+      return '/';
     if (
       [
         '/settings/models',

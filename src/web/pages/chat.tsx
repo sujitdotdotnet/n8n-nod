@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
   type SetStateAction,
 } from 'react';
 import { createPortal, flushSync } from 'react-dom';
@@ -33,6 +34,7 @@ import { classifyVerificationReply, securityCodeIn } from '../../shared/verifica
 import { ChatTools } from '../components/chat-tools';
 import { ServiceLogo } from '../components/service-logo';
 import { Composer, type ComposerHandle, type ComposerSendResult } from '../components/composer';
+import type { Bot } from '../lib/bots';
 import { MessageBubble, WorkLabel, type MessageWork } from '../components/message';
 import { conversationFiles } from '../components/attachment-card';
 import { ArtifactWorkspace } from '../components/artifact-drawer';
@@ -68,7 +70,7 @@ import {
   type ChatReadCursor,
 } from '../lib/chat-unread';
 
-type ComposerReply = NonNullable<Message['replyTo']> & { answerQuestion?: true };
+type ComposerReply = NonNullable<Message['replyTo']> & { answerQuestion?: true; from?: string };
 type UnreadVisit = {
   ownerId: string;
   threadId: string;
@@ -335,9 +337,13 @@ export function Chat({
   onFeedback,
   onDismissFeedbackDiscovery,
   onReturnToMemory,
+  chat,
+  empty,
   turnTraces = false,
   onReset,
 }: {
+  chat?: Bot;
+  empty?: ReactNode;
   turnTraces?: boolean;
   onReset?(threadId: string): Promise<unknown>;
   ownerId: string;
@@ -358,6 +364,10 @@ export function Chat({
   onReturnToMemory?(): void;
 }) {
   const dateFormat = useDateFormat();
+  const messagesUrl = chat ? `/api/bots/${chat.id}/messages` : '/api/messages';
+  const aroundScope = chat ? `?botId=${chat.id}` : '';
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
   const [traceOpen, setTraceOpen] = useState(() => readUiPreference('nod.trace-open') === 'true');
   const tracing = turnTraces && traceOpen;
   function toggleTrace(open: boolean) {
@@ -426,6 +436,10 @@ export function Chat({
   const audioPreviews = useRef(new Map<string, string>());
   const [stopping, setStopping] = useState(false);
   const composer = useRef<ComposerHandle>(null);
+  const emptyChat = Boolean(chat) && state.messages.length === 0;
+  useEffect(() => {
+    if (emptyChat) requestAnimationFrame(() => composer.current?.focus());
+  }, [chat?.id, emptyChat]);
   const sendQueue = useRef(Promise.resolve(true));
   const sendCount = useRef(0);
   const pendingSends = useRef(0);
@@ -791,7 +805,8 @@ export function Chat({
     ? live.find((item) => !item.background && !item.taskId && !item.runId)
     : undefined;
   const lastOwner = allMessages.findLast((message) => message.role === 'user');
-  const routedWork = !chatWork && lastOwner?.work?.kind === 'task' ? lastOwner.work : undefined;
+  const routedWork =
+    !chat && !chatWork && lastOwner?.work?.kind === 'task' ? lastOwner.work : undefined;
   const routedItem = routedWork
     ? live.find(
         (entry) =>
@@ -865,7 +880,11 @@ export function Chat({
               if (!opened)
                 window.dispatchEvent(
                   new CustomEvent('nod:focus-message', {
-                    detail: { messageId: task.messageId, taskId: task.id },
+                    detail: {
+                      messageId: task.messageId,
+                      taskId: task.id,
+                      ...(chat ? { botId: chat.id } : {}),
+                    },
                   }),
                 );
             },
@@ -903,7 +922,7 @@ export function Chat({
     return () => window.clearTimeout(timer);
   }, [holding, finishing?.turnId]);
   const [welcoming, setWelcoming] = useState(
-    () => allMessages.length === 0 && !working && state.configuration.llmReady,
+    () => !chat && allMessages.length === 0 && !working && state.configuration.llmReady,
   );
   const introduction = usePageData<{ messageId: string | null }>('/api/onboarding/introduction');
   useEffect(() => {
@@ -1215,13 +1234,18 @@ export function Chat({
     return () => clearTimeout(timer);
   }, [connectionNotice]);
   useEffect(() => {
-    const notice = (event: Event) => setError((event as CustomEvent<string>).detail);
+    const notice = (event: Event) => {
+      if (visibleRef.current) setError((event as CustomEvent<string>).detail);
+    };
     window.addEventListener('nod:file-notice', notice);
     return () => window.removeEventListener('nod:file-notice', notice);
   }, []);
   useEffect(() => {
     const focusMessage = (event: Event) => {
-      const detail = (event as CustomEvent<{ messageId?: unknown; taskId?: unknown }>).detail;
+      const detail = (
+        event as CustomEvent<{ messageId?: unknown; taskId?: unknown; botId?: unknown }>
+      ).detail;
+      if ((detail?.botId ?? undefined) !== chat?.id) return;
       if (typeof detail?.messageId === 'string') {
         unreadPositioned.current = 'target';
         returnPosition.current = scrollPosition(scroll.current);
@@ -1234,7 +1258,7 @@ export function Chat({
         const version = ++focusRequest.current;
         const id = detail.messageId;
         const taskId = typeof detail.taskId === 'string' ? detail.taskId : undefined;
-        void api<Message[]>(`/api/messages/around/${id}`)
+        void api<Message[]>(`/api/messages/around/${id}${aroundScope}`)
           .then((messages) => {
             if (
               expectedThread !== threadRef.current ||
@@ -1547,7 +1571,7 @@ export function Chat({
         const expectedEpoch = hiddenHistory.current.epoch;
         try {
           const nearby = await api<Message[]>(
-            `/api/messages/around/${encodeURIComponent(replyId)}`,
+            `/api/messages/around/${encodeURIComponent(replyId)}${aroundScope}`,
             { signal: AbortSignal.timeout(15_000) },
           );
           if (threadRef.current !== sentThread) return { sent: true };
@@ -1583,6 +1607,7 @@ export function Chat({
         submittedBody ??
         JSON.stringify({
           threadId: sentThread,
+          ...(chat ? { botId: chat.id } : {}),
           chatClearedAt: sentChatClearedAt,
           clientMessageId: id,
           text: value,
@@ -1852,7 +1877,7 @@ export function Chat({
           before: before.createdAt,
           beforeId: before.id,
         });
-        const result = await api<MessageHistoryPage>(`/api/messages?${query}`, {
+        const result = await api<MessageHistoryPage>(`${messagesUrl}?${query}`, {
           signal: controller.signal,
         });
         if (controller.signal.aborted || hiddenHistory.current.epoch !== historyEpoch) return;
@@ -1903,7 +1928,7 @@ export function Chat({
     const controller = new AbortController();
     const focusVersion = focusRequest.current;
     for (const id of unchecked)
-      void api<Message[]>(`/api/messages/around/${encodeURIComponent(id)}`, {
+      void api<Message[]>(`/api/messages/around/${encodeURIComponent(id)}${aroundScope}`, {
         signal: controller.signal,
       })
         .then((messages) => {
@@ -1987,7 +2012,7 @@ export function Chat({
           before: before.createdAt,
           beforeId: before.id,
         });
-        return api<MessageHistoryPage>(`/api/messages?${query}`, { signal });
+        return api<MessageHistoryPage>(`${messagesUrl}?${query}`, { signal });
       },
       signal,
     )
@@ -2088,7 +2113,7 @@ export function Chat({
     setHistoryError('');
     try {
       const query = new URLSearchParams({ threadId, before: first.createdAt, beforeId: first.id });
-      const result = await api<MessageHistoryPage>(`/api/messages?${query}`, {
+      const result = await api<MessageHistoryPage>(`${messagesUrl}?${query}`, {
         signal: request.controller.signal,
       });
       if (
@@ -2243,7 +2268,7 @@ export function Chat({
     setStopping(true);
     setError('');
     try {
-      await post('/api/thread/stop');
+      await post('/api/thread/stop', chat ? { botId: chat.id } : undefined);
       captureAnalytics('chat_stop_requested');
       await refresh();
     } catch (cause) {
@@ -2255,7 +2280,13 @@ export function Chat({
   }
   const chatActions = (
     <>
-      <ChatTools files={files} tasks={state.tasks} />
+      <ChatTools
+        files={files}
+        tasks={state.tasks}
+        bots={state.bots}
+        enabled={visible}
+        botId={chat?.id}
+      />
       {turnTraces && (
         <Tooltip content={tracing ? 'Hide trace' : 'Show trace'}>
           <Button
@@ -2388,7 +2419,7 @@ export function Chat({
               !welcoming &&
               !working &&
               !sending &&
-              (state.configuration.llmReady ? <Welcome /> : modelSetup)}
+              (state.configuration.llmReady ? chat ? empty : <Welcome /> : modelSetup)}
             <div
               className="messages"
               role="log"
@@ -2450,6 +2481,8 @@ export function Chat({
                   ) : (
                     <MessageBubble
                       message={message}
+                      speakerName={chat?.name}
+                      replyFrom={message.replyTo?.role === 'assistant' ? chat?.name : undefined}
                       work={startedTask(message) ? undefined : workOf(message)}
                       task={chipOf(message)}
                       onStopTask={
@@ -2494,7 +2527,7 @@ export function Chat({
                             }
                           : undefined
                       }
-                      onAnswer={async (value, answer) => {
+                      onAnswer={async (value, answer, displayText) => {
                         const target = cardQuestions.get(message.id) ?? message;
                         const replying = (id?: string) => id === message.id || id === target.id;
                         if (replying(replyTo?.id) && composer.current?.hasDraft()) {
@@ -2510,6 +2543,7 @@ export function Chat({
                           'answer_choice',
                           undefined,
                           answer,
+                          displayText,
                         );
                         if (result.questionUnavailable) return 'unavailable';
                         if (!result.sent && result.error) throw new Error(result.error);
@@ -2601,7 +2635,7 @@ export function Chat({
                   routed={connected ? routed : undefined}
                 />
               )}
-              {connected && (
+              {connected && !chat && (
                 <TaskLine
                   tasks={state.tasks ?? []}
                   live={live}
@@ -2801,10 +2835,12 @@ export function Chat({
             }}
           >
             <Composer
-              key={`${ownerId}.${threadId}`}
+              key={`${ownerId}.${threadId}.${chat?.id ?? ''}`}
               active={visible}
+              name={chat?.name ?? 'Nod'}
+              placeholder={chat ? `Message ${chat.name}` : undefined}
               ref={composer}
-              draftKey={`nod.chat-draft.${ownerId}.${threadId}`}
+              draftKey={`nod.chat-draft.${ownerId}.${threadId}${chat ? `.${chat.id}` : ''}`}
               privateReply={Boolean(state.verificationRequests?.length)}
               restoreReply={(saved) => {
                 if (!saved || !hiddenMessageIds.current.has(saved.id)) setReplyTo(saved);
@@ -2817,7 +2853,9 @@ export function Chat({
               busy={connected && working}
               text={text}
               setText={setText}
-              replyTo={replyTo}
+              replyTo={
+                replyTo?.role === 'assistant' && chat ? { ...replyTo, from: chat.name } : replyTo
+              }
               replyPreviewPending={Boolean(
                 replyTo && replyNeedsValidation(replyTo.id) && !replyValidationFailed(replyTo.id),
               )}

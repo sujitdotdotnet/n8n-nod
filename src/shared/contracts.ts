@@ -3,6 +3,7 @@ import type { TaskSuggestions } from './onboarding';
 import type { TrustBecause } from './trust';
 import type { AnswerChoices } from './answer-choices';
 import type { ModelIssue, ModelSelection, WorkKind } from './models';
+import type { Bot } from './bots';
 export type TurnStatus = 'queued' | 'running' | 'succeeded' | 'waiting' | 'failed' | 'cancelled';
 export interface Artifact {
   id: string;
@@ -41,6 +42,7 @@ export interface Message {
   approval?: MessageApproval;
   cardAnswer?: true;
   work?: { kind: 'task' | 'schedule'; id: string; title: string; turnId?: string };
+  botId?: string | null;
 }
 export type ApprovalState = 'pending' | 'working' | 'done' | 'declined' | 'expired' | 'uncertain';
 export interface MessageApproval {
@@ -69,6 +71,7 @@ export interface VerificationRequest {
   id: string;
   turnId: string;
   kind: 'otp' | 'payment';
+  botId?: string | null;
 }
 export interface Turn {
   id: string;
@@ -78,10 +81,12 @@ export interface Turn {
   createdAt: string;
   finishedAt?: string | null;
   error?: string | null;
+  botId?: string | null;
 }
 export interface Activity {
   turnId: string;
   taskId: string | null;
+  botId?: string | null;
   title: string | null;
   step: string | null;
   site: string | null;
@@ -263,6 +268,7 @@ export interface AppState {
   chatRecovery?: { turnId: string };
   chatClearedAt?: string;
   tasks?: Task[];
+  bots?: Bot[];
   threadId: string;
   hasEarlierMessages?: boolean;
   hiddenMessageCount?: number;
@@ -313,6 +319,7 @@ export interface Task {
   revision?: number;
   appliedRevision?: number;
   model?: ModelSelection | null;
+  botId?: string | null;
   work?: WorkKind;
   scheduleModel?: ModelSelection;
 }
@@ -359,6 +366,7 @@ export interface Schedule {
   watch: string[] | null;
   model: ModelSelection | null;
   monthlyUsd: number | null;
+  botId?: string | null;
 }
 export type ScheduleObservation = {
   sourceUrl: string;
